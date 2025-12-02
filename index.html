@@ -213,8 +213,10 @@
       }, [cellType]);
 
       useEffect(() => {
-        tRef.current = PHASES[cellType][phaseIndex].graph.start;
-      }, [cellType, phaseIndex]);
+  setT(PHASES[cellType][phaseIndex].graph.start);
+  // unlock all ions for new phase
+  particlesRef.current.forEach(p => { p.lockedPhaseKey = null; });
+}, [cellType, phaseIndex]);
 
       useEffect(() => {
         const canvas = canvasRef.current;
@@ -274,13 +276,128 @@
             ctx.fillText(ch.label, cx - 18, membraneY + 30);
           });
 
-          const particles = particlesRef.current;
-          for (const p of particles) {
-            p.vx += (Math.random() - 0.5) * 0.05;
-            p.vy += (Math.random() - 0.5) * 0.05;
-            p.vx *= 0.97;
-            p.vy *= 0.97;
-            p.cooldown = Math.max(0, p.cooldown - dt);
+         // particles
+const particles = particlesRef.current;
+for (const p of particles) {
+  // baseline jitter
+  p.vx += (Math.random() - 0.5) * 0.05;
+  p.vy += (Math.random() - 0.5) * 0.05;
+
+  // mild damping
+  p.vx *= 0.97;
+  p.vy *= 0.97;
+
+  // cooldown prevents instant recross
+  p.cooldown = Math.max(0, p.cooldown - dt);
+
+  // find flux for THIS ion in this phase (if any)
+  const flux = phase.flux.find((f) => f.ion === p.ion);
+
+  // --------------------------
+  // RULE 1: only ions on SOURCE side can seek a channel
+  // --------------------------
+  const isSourceSide =
+    flux?.dir === "in"
+      ? p.compartment === "out"   // only outside ions move toward channel
+      : flux?.dir === "out"
+      ? p.compartment === "in"    // only inside ions move toward channel
+      : false;
+
+  // --------------------------
+  // RULE 2: after crossing in a phase, ion is locked for that phase
+  // --------------------------
+  const lockedThisPhase = p.lockedPhaseKey === phase.key;
+
+  // if not eligible (wrong side or locked), repel from membrane/channels
+  const notEligible = !flux || !isSourceSide || lockedThisPhase;
+
+  if (notEligible) {
+    // gentle repulsion from membrane so they don't hang out in channels
+    const dyFromMembrane = p.y - membraneY;
+    if (Math.abs(dyFromMembrane) < 35) {
+      p.vy += (dyFromMembrane > 0 ? 1 : -1) * 0.8 * dt;
+    }
+  } else {
+    // eligible ions seek their matching open channel
+    const targetKey = openChannels.find((k) => ionForChannel(k) === p.ion);
+    if (targetKey) {
+      const ch = CHANNELS.find((c) => c.key === targetKey);
+      if (ch) {
+        const tx = ch.x * width;
+        const ty = membraneY;
+
+        const dx = tx - p.x;
+        const dy = ty - p.y;
+        const dist = Math.hypot(dx, dy) + 0.001;
+
+        const accel = strengthToSpeed(flux.strength || "medium") * 0.6;
+
+        p.vx += (dx / dist) * accel * dt;
+        p.vy += (dy / dist) * accel * dt;
+
+        // CROSSING ONLY through channel mouth
+        const inMouth =
+          Math.abs(p.y - membraneY) < 8 &&
+          Math.abs(p.x - tx) < 12 &&
+          p.cooldown === 0;
+
+        if (inMouth) {
+          if (flux.dir === "in" && p.compartment === "out") {
+            p.compartment = "in";
+            p.y = membraneY + 28;   // jump clearly inside
+            p.vy += 5.0;            // push away from membrane
+            p.cooldown = 1.0;
+            p.lockedPhaseKey = phase.key; // LOCK for this phase
+          }
+
+          if (flux.dir === "out" && p.compartment === "in") {
+            p.compartment = "out";
+            p.y = membraneY - 28;   // jump clearly outside
+            p.vy -= 5.0;            // push away from membrane
+            p.cooldown = 1.0;
+            p.lockedPhaseKey = phase.key; // LOCK for this phase
+          }
+        }
+      }
+    }
+  }
+
+  // integrate motion
+  p.x += p.vx;
+  p.y += p.vy;
+
+  // wrap/contain
+  if (p.x < -10) p.x = width + 10;
+  if (p.x > width + 10) p.x = -10;
+  if (p.y < topBound) p.y = topBound;
+  if (p.y > bottomBound) p.y = bottomBound;
+
+  // draw shape (unchanged)
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  ctx.fillStyle = ION_COLORS[p.ion];
+  ctx.strokeStyle = "#111827";
+  ctx.lineWidth = 1;
+
+  if (p.ion === "Na") {
+    ctx.beginPath();
+    ctx.rect(-4.5, -4.5, 9, 9);
+    ctx.fill(); ctx.stroke();
+  } else if (p.ion === "K") {
+    ctx.beginPath();
+    ctx.moveTo(0, -5);
+    ctx.lineTo(5, 5);
+    ctx.lineTo(-5, 5);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+  } else {
+    ctx.beginPath();
+    ctx.arc(0, 0, 4.5, 0, Math.PI * 2);
+    ctx.fill(); ctx.stroke();
+  }
+  ctx.restore();
+}
+
 
             const targetKey = openChannels.find((k) => ionForChannel(k) === p.ion);
             if (targetKey) {
